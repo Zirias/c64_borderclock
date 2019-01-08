@@ -1,0 +1,9 @@
+obj/
+.*.swp
+*~
+*.lbl
+*.map
+*.prg
+*.bin
+*.exo
+
