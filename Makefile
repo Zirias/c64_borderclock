@@ -5,16 +5,21 @@ VICE?=x64sc
 EXO?=exomizer
 
 C64ASFLAGS?=-t $(C64SYS) -g
-C64LDFLAGS?=-Ln clock.lbl -m clock.map -Csrc/clock.cfg
 
 clock_LDCFG:=src/clock.cfg
-clock_OBJS:=$(addprefix obj/,main.o clock.o sprites.o)
+clock_OBJS:=$(addprefix obj/,main.o clock.o)
 clock_BIN:=clock.prg
 clock_EXO:=clock.exo
 
 borderclock_LDCFG:=src/borderclock.cfg
 borderclock_OBJS:=$(addprefix obj/,load.o exodecrunch.o)
 borderclock_BIN:=borderclock.prg
+
+ifeq ($(DEFFONT),)
+clock_OBJS+=obj/sprites.o
+else
+C64ASFLAGS+=-DDEFFONT
+endif
 
 all: $(borderclock_BIN)
 

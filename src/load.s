@@ -17,7 +17,7 @@ sysaddr:
 		ldy	#>decrmsg
 		jsr	STROUT
 		jsr	decrunch
-		jsr	$c000
+		jsr	$c2c0
 		pla
 		pla
 		lda	#>(NEW-1)
