@@ -162,11 +162,12 @@ nostall:	ldx	seconds		; load current seconds
 		stx	minutes
 		ldx	hours		; load current hours
 		inx			; increment
+		stx	hours		; and store
 		cpx	#24		; reached 24?
-		bcc	hoursok		; if not, skip resetting them
+		bcc	clock_get	; if not, return current clock
 		ldx	#$0		; reset hours to 0
-hoursok:	stx	hours		; and store
-		bpl	clock_get	; go to returning current clock
+		stx	hours		; and store
+		beq	clock_get	; go to returning current clock
 
 done:		clc			; clear carry to signal "no change"
 		rts			; and return
