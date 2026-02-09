@@ -1,5 +1,5 @@
 ;
-; Copyright (c) 2002 - 2005 Magnus Lind.
+; Copyright (c) 2002 - 2020 Magnus Lind.
 ;
 ; This software is provided 'as-is', without any express or implied warranty.
 ; In no event will the authors be held liable for any damages arising from
@@ -24,42 +24,187 @@
 ;   specific prior written permission.
 ;
 ; -------------------------------------------------------------------
+; Known quirks:
+;  Can't handle a sequence reference that ends at $ffff. It is left in
+;  since it is a corner case and fixing it impacts negatively on
+;  performance or backwards compatibility.
+;  A simple way to work around this is to not decrunch to address $ffff.
+; -------------------------------------------------------------------
+; Controls if the shared get_bits routines should be inlined or not.
+;INLINE_GET_BITS=1
+.IFNDEF INLINE_GET_BITS
+INLINE_GET_BITS = 0
+.ENDIF
+; -------------------------------------------------------------------
+; if literal sequences is not used (the data was crunched with the -c
+; flag) then the following line can be uncommented for shorter and.
+; slightly faster code.
+;LITERAL_SEQUENCES_NOT_USED = 1
+.IFNDEF LITERAL_SEQUENCES_NOT_USED
+LITERAL_SEQUENCES_NOT_USED = 0
+.ENDIF
+; -------------------------------------------------------------------
+; if the sequence length is limited to 256 (the data was crunched with
+; the -M256 flag) then the following line can be uncommented for
+; shorter and slightly faster code.
+;MAX_SEQUENCE_LENGTH_256 = 1
+.IFNDEF MAX_SEQUENCE_LENGTH_256
+MAX_SEQUENCE_LENGTH_256 = 0
+.ENDIF
+; -------------------------------------------------------------------
+; if the sequence length 3 has its own offset table (the data was
+; crunched with the -P+16 flag) then the following
+; line must be uncommented.
+;EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE = 1
+.IFNDEF EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE
+EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE = 0
+.ENDIF
+; -------------------------------------------------------------------
+; if sequence offsets are not reused (the data was crunched with the
+; -P-32 flag) then the following line must be uncommented. Uncommenting the
+; line will also result in shorter and slightly faster code.
+;DONT_REUSE_OFFSET = 1
+.IFNDEF DONT_REUSE_OFFSET
+DONT_REUSE_OFFSET = 0
+.ENDIF
+; -------------------------------------------------------------------
+; if decrunching forwards then the following line must be uncommented.
+;DECRUNCH_FORWARDS = 1
+.IFNDEF DECRUNCH_FORWARDS
+DECRUNCH_FORWARDS = 0
+.ENDIF
+; -------------------------------------------------------------------
+; if split encoding is used (the data is crunched with the -E flag)
+; then the following line must be uncommented.
+;ENABLE_SPLIT_ENCODING = 1
+.IFNDEF ENABLE_SPLIT_ENCODING
+ENABLE_SPLIT_ENCODING = 0
+.ENDIF
+
+; -------------------------------------------------------------------
 ; The decruncher jsr:s to the get_crunched_byte address when it wants to
-; read a crunched byte. This subroutine has to preserve x and y register
-; and must not modify the state of the carry flag.
+; read a crunched byte into A. This subroutine has to preserve X and Y
+; register and must not modify the state of the carry nor the overflow flag.
 ; -------------------------------------------------------------------
 .import get_crunched_byte
 ; -------------------------------------------------------------------
-; this function is the heart of the decruncher.
+; This function is the heart of the decruncher. (for non split crunched files)
 ; It initializes the decruncher zeropage locations and precalculates the
 ; decrunch tables and decrunches the data
 ; This function will not change the interrupt status bit and it will not
 ; modify the memory configuration.
 ; -------------------------------------------------------------------
 .export decrunch
-
+.IF ENABLE_SPLIT_ENCODING <> 0
 ; -------------------------------------------------------------------
-; if literal sequences is not used (the data was crunched with the -c
-; flag) then the following line can be uncommented for shorter code.
-LITERAL_SEQUENCES_NOT_USED = 1
+; To decrunch files crunched with the split feature (-E) you can't use the
+; decrunch function. Instead you call the split_decrunch function. But you
+; can only do this if the decrunch table contains the encoding used by the
+; file you are decrunching. To generate the correct content for the decrunch
+; table call set the get_crunched_byte function to point to the encoding data
+; and then call the split_gentable function.
+; -------------------------------------------------------------------
+.export split_gentable
+.export split_decrunch
+.ENDIF
 ; -------------------------------------------------------------------
 ; zero page addresses used
 ; -------------------------------------------------------------------
-zp_len_lo = $a7
+zp_len_lo = $9e
+zp_len_hi = $9f
 
 zp_src_lo  = $ae
 zp_src_hi  = zp_src_lo + 1
 
-zp_bits_hi = $fc
+zp_bits_hi = $a7
+.IF DONT_REUSE_OFFSET = 0
+zp_ro_state = $a8
+.ENDIF
 
 zp_bitbuf  = $fd
-zp_dest_lo = zp_bitbuf + 1	; dest addr lo
-zp_dest_hi = zp_bitbuf + 2	; dest addr hi
+zp_dest_lo = zp_bitbuf + 1      ; dest addr lo
+zp_dest_hi = zp_bitbuf + 2      ; dest addr hi
+
+.IF EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE <> 0
+encoded_entries = 68
+.ELSE
+encoded_entries = 52
+.ENDIF
 
 tabl_bi = decrunch_table
-tabl_lo = decrunch_table + 52
-tabl_hi = decrunch_table + 104
+tabl_lo = decrunch_table + encoded_entries
+tabl_hi = decrunch_table + encoded_entries * 2
 
+        ;; refill bits is always inlined
+.MACRO mac_refill_bits
+        pha
+        jsr get_crunched_byte
+        rol
+        sta zp_bitbuf
+        pla
+.ENDMACRO
+
+.MACRO mac_get_bits
+.IF INLINE_GET_BITS <> 0
+.SCOPE
+        adc #$80                ; needs c=0, affects v
+        asl
+        bpl gb_skip
+gb_next:
+        asl zp_bitbuf
+        bne gb_ok
+        mac_refill_bits
+gb_ok:
+        rol
+        bmi gb_next
+gb_skip:
+        bvc skip
+gb_get_hi:
+        sec
+        sta zp_bits_hi
+        jsr get_crunched_byte
+skip:
+.ENDSCOPE
+.ELSE
+        jsr get_bits
+.ENDIF
+.ENDMACRO
+
+.MACRO mac_init_zp
+.SCOPE
+; -------------------------------------------------------------------
+; init zeropage and x reg. (8 bytes)
+;
+init_zp:
+        jsr get_crunched_byte
+        sta zp_bitbuf - 1,x
+        dex
+        bne init_zp
+.ENDSCOPE
+.ENDMACRO
+
+.code
+
+.IF INLINE_GET_BITS = 0
+get_bits:
+        adc #$80                ; needs c=0, affects v
+        asl
+        bpl gb_skip
+gb_next:
+        asl zp_bitbuf
+        bne gb_ok
+        mac_refill_bits
+gb_ok:
+        rol
+        bmi gb_next
+gb_skip:
+        bvs gb_get_hi
+        rts
+gb_get_hi:
+        sec
+        sta zp_bits_hi
+        jmp get_crunched_byte
+.ENDIF
 ; -------------------------------------------------------------------
 ; no code below this comment has to be modified in order to generate
 ; a working decruncher of this source file.
@@ -71,247 +216,351 @@ tabl_hi = decrunch_table + 104
 ; jsr this label to decrunch, it will in turn init the tables and
 ; call the decruncher
 ; no constraints on register content, however the
-; decimal flag has to be #0 (it almost always is, otherwise do a cld)
-.code
-
+; decimal flag has to be cleared (it almost always is, otherwise do a cld)
 decrunch:
+.IF ENABLE_SPLIT_ENCODING <> 0
+        ldx #3
+        jsr internal_gentable
+        jmp normal_decrunch
+split_gentable:
+        ldx #1
+internal_gentable:
+        jsr split_init_zp
+.ELSE
+        ldx #3
+        mac_init_zp
+.ENDIF
 ; -------------------------------------------------------------------
-; init zeropage, x and y regs. (12 bytes)
+; calculate tables (64 bytes) + get_bits macro
+; x must be #0 when entering
 ;
-	ldy #0
-	ldx #3
-init_zp:
-	jsr get_crunched_byte
-	sta zp_bitbuf - 1,x
-	dex
-	bne init_zp
+        ldy #0
+        clc
+table_gen:
+        tax
+        tya
+        and #$0f
+        sta tabl_lo,y
+        beq shortcut            ; start a new sequence
 ; -------------------------------------------------------------------
-; calculate tables (50 bytes)
-; x and y must be #0 when entering
-;
-nextone:
-	inx
-	tya
-	and #$0f
-	beq shortcut		; starta på ny sekvens
-
-	txa			; this clears reg a
-	lsr a			; and sets the carry flag
-	ldx tabl_bi-1,y
-rolle:
-	rol a
-	rol zp_bits_hi
-	dex
-	bpl rolle		; c = 0 after this (rol zp_bits_hi)
-
-	adc tabl_lo-1,y
-	tax
-
-	lda zp_bits_hi
-	adc tabl_hi-1,y
+        txa
+        adc tabl_lo - 1,y
+        sta tabl_lo,y
+        lda zp_len_hi
+        adc tabl_hi - 1,y
 shortcut:
-	sta tabl_hi,y
-	txa
-	sta tabl_lo,y
-
-	ldx #4
-	jsr get_bits		; clears x-reg.
-	sta tabl_bi,y
-	iny
-	cpy #52
-	bne nextone
-	ldy #0
-	beq begin
+        sta tabl_hi,y
 ; -------------------------------------------------------------------
-; get bits (29 bytes)
-;
-; args:
-;   x = number of bits to get
-; returns:
-;   a = #bits_lo
-;   x = #0
-;   c = 0
-;   z = 1
-;   zp_bits_hi = #bits_hi
-; notes:
-;   y is untouched
+        lda #$01
+        sta <zp_len_hi
+        lda #$78                ; %01111000
+        mac_get_bits
 ; -------------------------------------------------------------------
-get_bits:
-	lda #$00
-	sta zp_bits_hi
-	cpx #$01
-	bcc bits_done
-bits_next:
-	lsr zp_bitbuf
-	bne ok
-	pha
-literal_get_byte:
-	jsr get_crunched_byte
-	bcc literal_byte_gotten
-	ror a
-	sta zp_bitbuf
-	pla
-ok:
-	rol a
-	rol zp_bits_hi
-	dex
-	bne bits_next
-bits_done:
-	rts
+        lsr
+        tax
+        beq rolled
+        php
+rolle:
+        asl zp_len_hi
+        sec
+        ror
+        dex
+        bne rolle
+        plp
+rolled:
+        ror
+        sta tabl_bi,y
+        bmi no_fixup_lohi
+        lda zp_len_hi
+        stx zp_len_hi
+        .BYTE $24
+no_fixup_lohi:
+        txa
 ; -------------------------------------------------------------------
-; main copy loop (18(16) bytes)
-;
-copy_next_hi:
-	dex
-	dec zp_dest_hi
-	dec zp_src_hi
-copy_next:
-	dey
-.IFNDEF LITERAL_SEQUENCES_NOT_USED
-	bcc literal_get_byte
+        iny
+        cpy #encoded_entries
+        bne table_gen
+; -------------------------------------------------------------------
+.IF ENABLE_SPLIT_ENCODING <> 0
+        rts
+split_decrunch:
+        ldx #3
+        jsr split_init_zp
+; X reg must be 0 here
+        sec
+normal_decrunch:
 .ENDIF
-	lda (zp_src_lo),y
-literal_byte_gotten:
-	sta (zp_dest_lo),y
-copy_start:
-	tya
-	bne copy_next
-begin:
-	txa
-	bne copy_next_hi
 ; -------------------------------------------------------------------
-; decruncher entry point, needs calculated tables (21(13) bytes)
-; x and y must be #0 when entering
-;
-.IFNDEF LITERAL_SEQUENCES_NOT_USED
-	inx
-	jsr get_bits
-	tay
-	bne literal_start1
-.ELSE
-	dey
+; prepare for main decruncher
+.IF DONT_REUSE_OFFSET = 0
+        ror zp_ro_state
+        sec
 .ENDIF
-begin2:
-	inx
-	jsr bits_next
-	lsr a
-	iny
-	bcc begin2
-.IFDEF LITERAL_SEQUENCES_NOT_USED
-	beq literal_start
-.ENDIF
-	cpy #$11
-.IFNDEF LITERAL_SEQUENCES_NOT_USED
-	bcc sequence_start
-	beq bits_done
+        ldy zp_dest_lo
+        stx zp_dest_lo
+        stx zp_bits_hi
 ; -------------------------------------------------------------------
-; literal sequence handling (13(2) bytes)
+; copy one literal byte to destination (11 bytes)
 ;
-	ldx #$10
-	jsr get_bits
 literal_start1:
-	sta <zp_len_lo
-	ldx <zp_bits_hi
-	ldy #0
-	bcc literal_start
-sequence_start:
-.ELSE
-	bcs bits_done
+.IF DECRUNCH_FORWARDS = 0
+        tya
+        bne no_hi_decr
+        dec zp_dest_hi
+.IF DONT_REUSE_OFFSET = 0
+        dec zp_src_hi
+.ENDIF
+no_hi_decr:
+        dey
+.ENDIF
+        jsr get_crunched_byte
+        sta (zp_dest_lo),y
+.IF DECRUNCH_FORWARDS <> 0
+        iny
+        bne skip_hi_incr
+        inc zp_dest_hi
+.IF DONT_REUSE_OFFSET = 0
+        inc zp_src_hi
+.ENDIF
+skip_hi_incr:
 .ENDIF
 ; -------------------------------------------------------------------
-; calulate length of sequence (zp_len) (11 bytes)
+; fetch sequence length index (15 bytes)
+; x must be #0 when entering and contains the length index + 1
+; when exiting or 0 for literal byte
+next_round:
+.IF DONT_REUSE_OFFSET = 0
+        ror zp_ro_state
+.ENDIF
+        dex
+        lda zp_bitbuf
+no_literal1:
+        asl
+        bne nofetch8
+        jsr get_crunched_byte
+        rol
+nofetch8:
+        inx
+        bcc no_literal1
+        sta zp_bitbuf
+; -------------------------------------------------------------------
+; check for literal byte (2 bytes)
 ;
-	ldx tabl_bi - 1,y
-	jsr get_bits
-	adc tabl_lo - 1,y	; we have now calculated zp_len_lo
-	sta zp_len_lo
+        beq literal_start1
 ; -------------------------------------------------------------------
-; now do the hibyte of the sequence length calculation (6 bytes)
-	lda zp_bits_hi
-	adc tabl_hi - 1,y	; c = 0 after this.
-	pha
-; -------------------------------------------------------------------
-; here we decide what offset table to use (20 bytes)
-; x is 0 here
+; check for decrunch done and literal sequences (4 bytes)
 ;
-	bne nots123
-	ldy zp_len_lo
-	cpy #$04
-	bcc size123
-nots123:
-	ldy #$03
-size123:
-	ldx tabl_bit - 1,y
-	jsr get_bits
-	adc tabl_off - 1,y	; c = 0 after this.
-	tay			; 1 <= y <= 52 here
-; -------------------------------------------------------------------
-; Here we do the dest_lo -= len_lo subtraction to prepare zp_dest
-; but we do it backwards:	a - b == (b - a - 1) ^ ~0 (C-syntax)
-; (16(16) bytes)
-	lda zp_len_lo
-literal_start:			; literal enters here with y = 0, c = 1
-	sbc zp_dest_lo
-	bcc noborrow
-	dec zp_dest_hi
-noborrow:
-	eor #$ff
-	sta zp_dest_lo
-	cpy #$01		; y < 1 then literal
-.IFNDEF LITERAL_SEQUENCES_NOT_USED
-	bcc pre_copy
+        cpx #$11
+.IF INLINE_GET_BITS <> 0
+        bcc skip_jmp
+        jmp exit_or_lit_seq
+skip_jmp:
 .ELSE
-	bcc literal_get_byte
+        bcs exit_or_lit_seq
 .ENDIF
 ; -------------------------------------------------------------------
-; calulate absolute offset (zp_src) (27 bytes)
+; calulate length of sequence (zp_len) (18(11) bytes) + get_bits macro
 ;
-	ldx tabl_bi,y
-	jsr get_bits;
-	adc tabl_lo,y
-	bcc skipcarry
-	inc zp_bits_hi
-	clc
-skipcarry:
-	adc zp_dest_lo
-	sta zp_src_lo
-	lda zp_bits_hi
-	adc tabl_hi,y
-	adc zp_dest_hi
-	sta zp_src_hi
+        lda tabl_bi - 1,x
+        mac_get_bits
+        adc tabl_lo - 1,x       ; we have now calculated zp_len_lo
+        sta zp_len_lo
+.IF MAX_SEQUENCE_LENGTH_256 = 0
+        lda zp_bits_hi
+        adc tabl_hi - 1,x       ; c = 0 after this.
+        sta zp_len_hi
 ; -------------------------------------------------------------------
-; prepare for copy loop (8(6) bytes)
+; here we decide what offset table to use (27(26) bytes) + get_bits_nc macro
+; z-flag reflects zp_len_hi here
 ;
-	pla
-	tax
-.IFNDEF LITERAL_SEQUENCES_NOT_USED
-	sec
-pre_copy:
-	ldy <zp_len_lo
-	jmp copy_start
+        ldx zp_len_lo
 .ELSE
-	ldy <zp_len_lo
-	bcc copy_start
+        tax
+.ENDIF
+.IF MAX_SEQUENCE_LENGTH_256 = 0
+        lda #0
+.ENDIF
+.IF DONT_REUSE_OFFSET = 0
+; -------------------------------------------------------------------
+; here we decide to reuse latest offset or not (13(15) bytes)
+;
+        bit <zp_ro_state
+        bmi test_reuse
+no_reuse:
 .ENDIF
 ; -------------------------------------------------------------------
-; two small static tables (6(6) bytes)
+; here we decide what offset table to use (17(15) bytes)
 ;
+.IF MAX_SEQUENCE_LENGTH_256 = 0
+        sta <zp_bits_hi
+.ENDIF
+        lda #$e1
+.IF EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE <> 0
+        cpx #$04
+.ELSE
+        cpx #$03
+.ENDIF
+        bcs gbnc2_next
+        lda tabl_bit - 1,x
+gbnc2_next:
+        asl zp_bitbuf
+        bne gbnc2_ok
+        tax
+        jsr get_crunched_byte
+        rol
+        sta zp_bitbuf
+        txa
+gbnc2_ok:
+        rol
+        bcs gbnc2_next
+        tax
+; -------------------------------------------------------------------
+; calulate absolute offset (zp_src) (17 bytes) + get_bits macro
+;
+        lda tabl_bi,x
+        mac_get_bits
+.IF DECRUNCH_FORWARDS = 0
+        adc tabl_lo,x
+        sta zp_src_lo
+        lda zp_bits_hi
+        adc tabl_hi,x
+        adc zp_dest_hi
+        sta zp_src_hi
+.ELSE
+        clc
+        adc tabl_lo,x
+        eor #$ff
+        sta zp_src_lo
+        lda zp_bits_hi
+        adc tabl_hi,x
+        eor #$ff
+        adc zp_dest_hi
+        sta zp_src_hi
+        clc
+.ENDIF
+; -------------------------------------------------------------------
+; prepare for copy loop (2 bytes)
+;
+        ldx zp_len_lo
+; -------------------------------------------------------------------
+; main copy loop (30 bytes)
+;
+copy_next:
+.IF DECRUNCH_FORWARDS = 0
+        tya
+        bne copy_skip_hi
+        dec zp_dest_hi
+        dec zp_src_hi
+copy_skip_hi:
+        dey
+.ENDIF
+.IF LITERAL_SEQUENCES_NOT_USED = 0
+        bcs get_literal_byte
+.ENDIF
+        lda (zp_src_lo),y
+literal_byte_gotten:
+        sta (zp_dest_lo),y
+.IF DECRUNCH_FORWARDS <> 0
+        iny
+        bne copy_skip_hi
+        inc zp_dest_hi
+        inc zp_src_hi
+copy_skip_hi:
+.ENDIF
+        dex
+        bne copy_next
+.IF MAX_SEQUENCE_LENGTH_256 = 0
+        lda zp_len_hi
+.IF INLINE_GET_BITS <> 0
+        bne copy_next_hi
+.ENDIF
+.ENDIF
+        stx zp_bits_hi
+.IF INLINE_GET_BITS = 0
+        beq next_round
+.ELSE
+        jmp next_round
+.ENDIF
+.IF MAX_SEQUENCE_LENGTH_256 = 0
+copy_next_hi:
+        dec zp_len_hi
+        jmp copy_next
+.ENDIF
+.IF DONT_REUSE_OFFSET = 0
+; -------------------------------------------------------------------
+; test for offset reuse (11 bytes)
+;
+test_reuse:
+        bvs no_reuse
+.IF MAX_SEQUENCE_LENGTH_256 <> 0
+        lda #$00                ; fetch one bit
+.ENDIF
+        asl zp_bitbuf
+        bne gbnc1_ok
+        pha
+        jsr get_crunched_byte
+        rol
+        sta zp_bitbuf
+        pla
+gbnc1_ok:
+        rol
+        beq no_reuse            ; bit == 0 => C=0, no reuse
+        bne copy_next           ; bit != 0 => C=0, reuse previous offset
+.ENDIF
+; -------------------------------------------------------------------
+; exit or literal sequence handling (16(12) bytes)
+;
+exit_or_lit_seq:
+.IF LITERAL_SEQUENCES_NOT_USED = 0
+        beq decr_exit
+        jsr get_crunched_byte
+.IF MAX_SEQUENCE_LENGTH_256 = 0
+        sta zp_len_hi
+.ENDIF
+        jsr get_crunched_byte
+        tax
+        bcs copy_next
+decr_exit:
+.ENDIF
+        rts
+.IF LITERAL_SEQUENCES_NOT_USED = 0
+get_literal_byte:
+        jsr get_crunched_byte
+        bcs literal_byte_gotten
+.ENDIF
+.IF EXTRA_TABLE_ENTRY_FOR_LENGTH_THREE <> 0
+; -------------------------------------------------------------------
+; the static stable used for bits+offset for lengths 1, 2 and 3 (3 bytes)
+; bits 2, 4, 4 and offsets 64, 48, 32 corresponding to
+; %10010000, %11100011, %11100010
 tabl_bit:
-	.byte 2,4,4
-tabl_off:
-	.byte 48,32,16
+        .BYTE $90, $e3, $e2
+.ELSE
+; -------------------------------------------------------------------
+; the static stable used for bits+offset for lengths 1 and 2 (2 bytes)
+; bits 2, 4 and offsets 48, 32 corresponding to %10001100, %11100010
+tabl_bit:
+        .BYTE $8c, $e2
+.ENDIF
+
+.IF ENABLE_SPLIT_ENCODING <> 0
+split_init_zp:
+        mac_init_zp
+        rts
+.ENDIF
 ; -------------------------------------------------------------------
 ; end of decruncher
 ; -------------------------------------------------------------------
 
 ; -------------------------------------------------------------------
-; this 156 byte table area may be relocated. It may also be clobbered
-; by other data between decrunches.
+; this 156 (204) byte table area may be relocated. It may also be
+; clobbered by other data between decrunches.
 ; -------------------------------------------------------------------
+
 .bss
 
 decrunch_table:
-	.res 156
+        .res 156
 ; -------------------------------------------------------------------
 ; end of decruncher
 ; -------------------------------------------------------------------
