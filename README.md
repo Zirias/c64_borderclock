@@ -8,3 +8,5 @@ To demonstrate this, the clock is shown in the border.
 Because polling the clock is done in a raster IRQ, the clock will go wrong
 when IRQs are disabled, for example by the stock disk and tape I/O routines.
 
+Download binary:
+[borderclock.prg](https://github.com/Zirias/c64_borderclock/blob/bin/borderclock.prg?raw=true)
